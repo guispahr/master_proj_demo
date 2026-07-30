@@ -3,8 +3,8 @@
 
 > **⚠️ Repository status**
 >
-> Parts of the codebase corresponding to ongoing research are intentionally
-> omitted and will be released upon publication.
+> Parts of this repository have been intentionally omitted from the public
+> release.
 
 <p align="center">
   Point-cloud semantic segmentation with optional multi-view <b>camera–image fusion</b>,
