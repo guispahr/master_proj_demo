@@ -1,0 +1,371 @@
+# G = SegDino-inspired concat fusion of K DINO intermediates.
+#
+# Per decoder stage, the K DINO layers are projected (Conv1×1 → c_proj),
+# pyramid-downsampled, and CONCATENATED along the channel dim instead of
+# weighted-summed (as in F). Downstream PWconvs (DPTFusionBlock / FPN top-down
+# / AddSkipUpImageFusion.img_proj) can now mix DIFFERENT channels from
+# DIFFERENT DINO layers — an expressive freedom F's weighted sum cannot
+# represent. With c_proj = image_inner_dim_F / K = 512 / 4 = 128, the output
+# width matches F's (= 512) and the param count stays close to baseline.
+
+
+_base_: base.yaml
+
+run_name: LitePT-Ditr-v2-G/c128-run1
+
+dataset:
+  type: S3DIS
+  with_images: 10
+  image_root: "/rcp/gspahr/s3dis_images"
+
+mix_prob: 0.8
+
+# =============================================================================
+# Model settings
+# =============================================================================
+model:
+  type: Point-Segmentor-GeoAux
+  num_classes: 13
+  backbone_out_channels: 72
+  geo_out_channels: 72
+  backbone:
+    type: LitePT-Ditr-v2-G
+    in_channels: 6
+    order: ["z", "z-trans", "hilbert", "hilbert-trans"]
+    stride: [2, 2, 2, 2]
+    enc_depths: [2, 2, 2, 6, 2]
+    enc_channels: [48, 96, 192, 384, 504]
+    enc_num_head: [2, 4, 8, 16, 28]
+    enc_patch_size: [1024, 1024, 1024, 1024, 1024]
+    enc_conv: [True, True, True, False, False]
+    enc_attn: [False, False, False, True, True]
+    enc_rope_freq: [100.0, 100.0, 100.0, 100.0, 100.0]
+    dec_depths: [0, 0, 0, 0]
+    dec_channels: [72, 72, 144, 252]
+    dec_num_head: [4, 4, 8, 14]
+    dec_patch_size: [1024, 1024, 1024, 1024]
+    dec_conv: [False, False, False, False]
+    dec_attn: [False, False, False, False]
+    dec_rope_freq: [100.0, 100.0, 100.0, 100.0]
+    mlp_ratio: 4
+    qkv_bias: True
+    qk_scale: null
+    attn_drop: 0.0
+    proj_drop: 0.0
+    drop_path: 0.3
+    pre_norm: True
+    shuffle_orders: True
+    enc_mode: False
+    freeze_encoder: False
+    dino_type: DinoV3
+    dino_size: base
+    dino_frozen: True
+    use_checkpoint: False
+
+    # Every decoder stage uses gather-based fusion (matches F's default).
+    dec_fusion:
+      - name: add_skip_up_image     # s=0  finest  (dec_channels[0] = 72)
+        use_ffn: False
+      - name: add_skip_up_image     # s=1           (dec_channels[1] = 72)
+        use_ffn: False
+      - name: add_skip_up_image     # s=2           (dec_channels[2] = 144)
+        use_ffn: False
+      - name: add_skip_up_image     # s=3  coarsest (dec_channels[3] = 252)
+        use_ffn: False
+
+    # K = 4 DINO blocks. Same indices as F so the input signal is identical.
+    dino_fusion_layers: [-9, -6, -3, -1]
+
+    # Per-DINO-layer projection width. Output width = K * c_proj = 4 * 128 = 512
+    # (matches F's image_inner_dim). Bump to 256/512 to widen the concat output.
+    c_proj: 128
+
+    img_proj_dropout: 0.0
+
+    # One spatial octave per decoder stage, matching the 3D backbone's
+    # stride-2 pooling. Stage s gets image map at (H/2^s, W/2^s) and effective
+    # patch_size = base_patch_size * 2^s.
+    pyramid_stage_downsamples: [0, 1, 2, 3]
+
+    geo_dec: true
+
+
+# =============================================================================
+# Training settings
+# =============================================================================
+training:
+  split: ["Area_1", "Area_2", "Area_3", "Area_4", "Area_6"]
+  resume: null
+  epochs: 3000
+  device: "cuda"
+  eval_every: 5
+  batch_size: 12
+  seed: 42
+  num_workers: 21
+  prefetch_factor: 2
+  amp: True
+  amp_dtype: bfloat16
+  grad_clip: 10.0
+  debug_nan: True
+  grad_accum: 1
+  save_period: 5
+  early_stopping_patience: 0
+  transform:
+    - Update:
+        keys_dict:
+          index_valid_keys: [
+              coord,
+              color,
+              normal,
+              segment,
+              grid_coord,
+              image_coord,
+              image_mask
+          ]
+    - CenterShift:
+        apply_z: true
+        center_mode: bounding_box
+
+    - RandomDropout:
+        dropout_ratio: 0.2
+        dropout_application_ratio: 0.2
+
+    # - RandomZRotation:
+    #     angle_range: [-1, 1]
+    - RandomRotate:
+        angle: [-1, 1]
+        axis: z
+        center: [0, 0, 0]
+        p: 0.5
+    - RandomRotate:
+        angle: [-1 / 64, 1 / 64]
+        axis: x
+        p: 0.5
+    - RandomRotate:
+        angle: [-1 / 64, 1 / 64]
+        axis: y
+        p: 0.5
+
+    - RandomScale:
+        scale_range: [0.9, 1.1]
+
+    - RandomJitter:
+        sigma: 0.005
+        clip: 0.02
+
+    - RandomFlip:
+        p: 0.5
+
+    - ChromaticAutoContrast:
+        p: 0.2
+        blend_factor: null
+    
+    - ChromaticTranslation:
+        p: 0.95
+        ratio: 0.05
+    
+    - ChromaticJitter:
+        p: 0.95
+        std: 0.05
+
+    - GridSample:
+        grid_size: 0.02
+        hash_type: "fnv"
+        mode: "train"
+        return_grid_coord: True
+
+    - SphereCrop:
+        sample_rate: 0.6
+        mode: random
+    
+    - SphereCrop:
+        point_max: 204800
+        mode: random
+
+    - CenterShift:
+        apply_z: False
+        center_mode: bounding_box
+
+    - NormalizeColor: null
+
+    - ImageResize:
+        size: [528, 528]
+
+    - ImageColorJitter:
+        brightness: 0.4
+        contrast: 0.4
+        saturation: 0.2
+        hue: 0.1
+
+    - ImageRandomHorizontalFlip: null
+
+    - ImageNormalize: null
+
+    - ToTensor: null
+
+    - Collect:
+        keys: ["coord", "grid_coord", "segment", "image", "image_coord", "image_mask"]
+        feat_keys: ["color", "normal"]
+
+
+# =============================================================================
+# Validation settings
+# =============================================================================
+
+val:
+ split: "Area_5"
+ batch_size: 12
+ num_workers: 24
+ transform:
+  - Copy:
+      keys_dict: {"coord": "origin_coord", "segment": "origin_segment"}
+  - Update:
+      keys_dict:
+        index_valid_keys: [
+              coord,
+              color,
+              normal,
+              segment,
+              grid_coord,
+              image_coord,
+              image_mask
+          ]
+
+  - CenterShift:
+      apply_z: true
+      center_mode: bounding_box
+
+  - GridSample:
+      grid_size: 0.02
+      hash_type: "fnv"
+      mode: "train"
+      return_grid_coord: True
+      return_inverse: True
+
+  - CenterShift:
+        apply_z: False
+        center_mode: bounding_box
+
+  - NormalizeColor: null
+
+  - ImageResize:
+      size: [528, 528]
+
+  - ImageNormalize: null
+
+  - ToTensor: null
+
+  - Collect:
+      keys: ["coord", "grid_coord", "segment", "origin_segment", "inverse", "image", "image_coord", "image_mask"]
+      feat_keys: ["color", "normal"]
+
+
+# =============================================================================
+# Test settings
+# =============================================================================
+test:
+  split: "Area_5"
+  checkpoint: ./outputs/s3dis/${run_name}/weights/epoch1685.pt
+  results_dir: ./outputs/s3dis/${run_name}/test_results
+  batch_size: 1
+  num_workers: 4
+
+  transform:
+    - Update:
+        keys_dict:
+          index_valid_keys: [coord, color, normal, segment, image_coord, image_mask]
+    - CenterShift:
+        apply_z: True
+        center_mode: bounding_box
+    - NormalizeColor: null
+
+  test_cfg:
+    voxelize:
+      grid_size: 0.02
+      hash_type: fnv
+      mode: test
+      return_grid_coord: True
+
+    crop: null
+
+    post_transform:
+      - ImageResize:
+        size: [528, 528]
+      - ImageNormalize: null
+      - CenterShift:
+          apply_z: False
+          center_mode: bounding_box
+      - ToTensor: null
+      - Collect:
+          keys: ["coord", "grid_coord", "index", "image_coord", "image_mask"]
+          feat_keys: ["color", "normal"]
+
+    aug_transform: 
+      - RandomScale: {scale_range: [0.9, 0.9]}
+      - RandomScale: {scale_range: [0.95, 0.95]}
+      - RandomScale: {scale_range: [1, 1]}
+      - RandomScale: {scale_range: [1.05, 1.05]}
+      - RandomScale: {scale_range: [1.1, 1.1]}
+      - {RandomScale: {scale_range: [0.9, 0.9]}, RandomFlip: {p: 1.0}}
+      - {RandomScale: {scale_range: [0.95, 0.95]}, RandomFlip: {p: 1.0}}
+      - {RandomScale: {scale_range: [1, 1]}, RandomFlip: {p: 1.0}}
+      - {RandomScale: {scale_range: [1.05, 1.05]}, RandomFlip: {p: 1.0}}
+      - {RandomScale: {scale_range: [1.1, 1.1]}, RandomFlip: {p: 1.0}}
+        
+# =============================================================================
+# Optimizer and scheduler settings
+# =============================================================================
+
+optim:
+  optimizer: adamw
+  weight_decay: 0.05
+
+param_dicts:
+  # - keyword: image_fusion
+  #   lr: 2e-4
+  #   weight_decay: 0.01
+  # - keyword: missing_proj
+  #   lr: 2e-4
+  #   weight_decay: 0.01
+  # - keyword: fusion
+  #   lr: 5e-4
+  #   weight_decay: 0.005
+  - keyword: block
+    lr: 6e-4
+
+  # For pretrained encoder
+  # - keyword: block
+  #   lr: 2e-5
+  # - keyword: enc
+  #   lr: 2e-5
+  # - keyword: embedding
+  #   lr: 2e-5
+
+
+scheduler:
+  start_lr: 6e-4
+  peak_lr: 6e-3
+  end_lr: 6e-7
+  warmup_epoch: 150
+
+
+# =============================================================================
+# Losses settings
+# =============================================================================
+
+losses:
+  - type: CrossEntropyLoss
+    loss_weight: 1.0
+    # label_smoothing: 0.01
+    ignore_index: ${data.ignore_index}
+  - type: LovaszLoss
+    loss_weight: 1.0
+    mode: multiclass
+    ignore_index: ${data.ignore_index}
+  - type: AuxGeoLoss
+    loss_weight: 0.5
+    ignore_index: ${data.ignore_index}
+    # label_smoothing: 0.01
+    ce_weight: 1.0
+    lovasz_weight: 1.0
+    lovasz_mode: multiclass

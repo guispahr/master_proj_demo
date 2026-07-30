@@ -1,0 +1,35 @@
+# =============================================================================
+# GridNet base configuration
+# All GridNet experiment configs inherit from this file via:
+#   _base_: base.yaml
+# Only override what differs from these defaults.
+# =============================================================================
+
+# ── Dataset (GridNet constants) ───────────────────────────────────────────────
+data:
+  # data_root: "/mnt/c/Users/guill/OneDrive/Bureau/Personal_projects/PDM_tests/GridNet-HD/preprocessed"
+  # "/net/lts2srv4/mnt/scratch/students/gspahr/GridNet/chunks"
+  data_root: "/rcp/gspahr/GridNet_preprocessed"
+  num_classes: 11
+  class_weight: [12.987, 22.727, 90.909, 181.818, 0.733, 2.674, 0.121, 1.337, 11.364, 454.545, 22.727]
+  ignore_index: 11
+  # ignore_index: 255
+
+
+dataset:
+  type: GridNet-Pair-Dataset
+  with_image: False
+  ignore_index: 11
+
+# ── Outputs & logging ─────────────────────────────────────────────────────────
+# REQUIRED in every experiment config — drives save_dir and W&B run name.
+run_name: ???
+
+outputs:
+  save_dir: ./outputs/gridnet/${run_name}
+
+loggers:
+  - type: CSVLogger
+  - type: WandbLogger
+    project: "GridNet-HD"
+    name: ${run_name}

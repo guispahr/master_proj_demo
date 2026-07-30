@@ -1,0 +1,287 @@
+_base_: base.yaml
+
+run_name: utonia-images/run1
+
+dataset:
+  type: GridNet-Pair-Dataset
+  with_normals: True
+  with_image: True
+
+mix_prob: 0.8
+
+# =============================================================================
+# Model settings
+# =============================================================================
+model:
+  type: Base-Segmentor
+  num_classes: 11
+  backbone_out_channels: 54
+  backbone:
+    type: Utonia-Ditr-v2
+    in_channels: 9
+    order: ["z", "z-trans", "hilbert", "hilbert-trans"]
+    stride: [2, 2, 2, 2]
+    enc_depths: [3, 3, 3, 12, 3]
+    enc_channels: [54, 108, 216, 432, 576]
+    enc_num_head: [3, 6, 12, 24, 32]
+    enc_patch_size: [1024, 1024, 1024, 1024, 1024]
+    dec_depths: [1, 1, 1, 1]
+    dec_channels: [54, 108, 216, 432]
+    dec_num_head: [3, 6, 12, 24]
+    dec_patch_size: [1024, 1024, 1024, 1024]
+    mlp_ratio: 4
+    qkv_bias: True
+    qk_scale: null
+    attn_drop: 0.0
+    proj_drop: 0.0
+    drop_path: 0.3
+    pre_norm: True
+    shuffle_orders: True
+    enable_rpe: False
+    enable_flash: True
+    upcast_attention: False
+    upcast_softmax: False
+    enc_mode: False
+    freeze_encoder: True
+    rope_base: 10
+    shift_coords: null
+    jitter_coords: 1.1
+    rescale_coords: 1.2
+    pretrained_backbone: utonia
+    dino_type: DinoV2
+    dino_size: base
+    dino_frozen: True
+    dino_missing_embedding: False
+    image_inner_dim: 512
+    # Global cross-attention defaults (used when a stage does not override them)
+    cross_attn_window_size: 3    # fallback window for all attention-based stages
+    chunk_size: 32768
+    use_checkpoint: False
+    temperature: 1.0
+
+    # Per-decoder-stage fusion config — one entry per decoder stage, ordered fine→coarse
+    # (same order as dec_channels / dec_depths).
+    #
+    # Each entry is a dict with:
+    #   name         (required) – fusion strategy:
+    #                  "add_skip_up"               skip + up  [no image — baseline]
+    #                  "add_skip_up_image"          skip + up + gathered_image
+    #                  "gated_image"                concat(skip,up) → project → gate image (no attn)
+    #                  "fuse_then_attn"            concat(skip,up) → project → cross-attn → residual
+    #                  "fuse_then_attn_gated_image" concat(skip,up) → project → gated cross-attn
+    #                  "up_attn_add_skip"           cross-attn(up) → add skip
+    #                  "up_attn_gated_skip"         cross-attn(up) → gated skip
+    #   window_size  (optional) – override cross_attn_window_size for this stage
+    #   num_heads    (optional) – attention heads (default 1)
+    #   use_ffn      (optional) – append ResidualFFN after fusion (default true)
+    #   scalar_gate  (optional) – scalar gate instead of per-channel (default false)
+    #
+    # Use lightweight fusion (fewer heads, small window, no FFN) at fine stages
+    # where N is large, and richer fusion at coarse stages near the bottleneck.
+    dec_fusion:
+      - name: add_skip_up_image     # s=0  finest  (dec_channels[0] = 72)
+        window_size: 1
+        # num_heads: 2
+        use_ffn: False
+      - name: add_skip_up_image     # s=1           (dec_channels[1] = 72)
+        window_size: 1
+        # num_heads: 2
+        use_ffn: False
+      - name: add_skip_up_image     # s=2           (dec_channels[2] = 144)
+        window_size: 1
+        # num_heads: 4
+        use_ffn: False
+      - name: add_skip_up_image     # s=3  coarsest (dec_channels[3] = 252)
+        window_size: 1
+        # num_heads: 6
+        use_ffn: False
+    
+    # dec_dino_layers: [-9, -6, null, null]
+    img_proj_dropout: 0.0
+
+
+# =============================================================================
+# Training settings
+# =============================================================================
+
+training:
+  split: train
+  resume: null
+  epochs: 50
+  device: "cuda"
+  eval_every: 1
+  test_every: 5
+  batch_size: 2
+  seed: 42
+  num_workers: 7
+  prefetch_factor: 2
+  amp: True
+  amp_dtype: bfloat16
+  grad_clip: 10.0
+  debug_nan: True
+  grad_accum: 5
+  save_period: 1
+  early_stopping_patience: 5
+  transform:
+    - Update:
+        keys_dict:
+          index_valid_keys: [
+              coord,
+              color,
+              normal,
+              segment,
+              grid_coord,
+              image_coord,
+              image_mask
+          ]
+
+    - RandomZRotation:
+        angle_range: [-1, 1]
+
+    - RandomScale:
+        scale_range: [0.95, 1.05]
+
+    - RandomJitter:
+        sigma: 0.01
+        clip: 0.05
+
+    - RandomFlip:
+        p: 0.5
+
+    - CenterShift:
+        apply_z: False
+        center_mode: centroid
+
+    - RandomShift:
+        shift: [[-0.2, 0.2], [-0.2, 0.2], [0, 0]]
+
+    - RandomDropout:
+        dropout_ratio: 0.2
+        dropout_application_ratio: 0.5
+
+    - GridSample:
+        grid_size: 0.05
+        # grid_sizes : [0.04, 0.05, 0.06]
+        hash_type: "fnv"
+        mode: "train"
+        return_grid_coord: True
+
+    - NormalizeColor: null
+
+    # Image augmentation
+    # ImageResize:
+    #   [420, 560]
+
+    - ImageColorJitter:
+        brightness: 0.4
+        contrast: 0.4
+        saturation: 0.2
+        hue: 0.1
+
+    - ImageRandomHorizontalFlip: null
+
+    - ImageNormalize: null
+
+    - ToTensor: null
+
+    - Collect:
+        keys: ["coord", "grid_coord", "segment", "image", "image_coord", "image_mask"]
+        feat_keys: ["coord", "color", "normal"]
+
+
+# =============================================================================
+# Validation settings
+# =============================================================================
+
+val:
+ split: val
+ batch_size: 5
+ num_workers: 8
+ transform:
+  - Update:
+      keys_dict:
+        index_valid_keys: [
+              coord,
+              color,
+              normal,
+              segment,
+              grid_coord,
+              image_coord,
+              image_mask
+          ]
+
+  - CenterShift:
+        apply_z: False
+        center_mode: centroid
+
+  - GridSample:
+      grid_size: 0.05
+      hash_type: "fnv"
+      mode: "train"
+      return_grid_coord: True
+      return_inverse: True
+
+  - NormalizeColor: null
+
+  - ImageNormalize: null
+
+  - ToTensor: null
+
+  - Collect:
+      keys: ["coord", "grid_coord", "segment", "image", "image_coord", "image_mask"]
+      feat_keys: ["coord", "color", "normal"]
+
+
+# =============================================================================
+# Optimizer and scheduler settings
+# =============================================================================
+
+optim:
+  optimizer: adamw
+  weight_decay: 0.005
+  momentum: 0.95
+
+param_dicts:
+  - keyword: img_pre_proj
+    lr: 2e-4
+    weight_decay: 0.01
+  - keyword: cross_attn
+    lr: 2e-4
+    weight_decay: 0.005
+  - keyword: img_gate
+    lr: 2e-4
+    weight_decay: 0.0 # avoid opening gates
+  - keyword: skip_gate
+    lr: 2e-4
+    weight_decay: 0.0 # avoid opening gates
+  - keyword: fusion
+    lr: 5e-4
+    weight_decay: 0.005
+  - keyword: block #self attention
+    lr: 2e-4    
+
+
+scheduler:
+  start_lr: 1e-7
+  peak_lr: 2e-3
+  end_lr: 1e-5
+  warmup_epoch: 5
+
+
+# =============================================================================
+# Losses settings
+# =============================================================================
+
+losses:
+  - type: CrossEntropyLoss
+    loss_weight: 1.0
+    # weight: [0.95, 1.13, 1.63, 1.88, 0.20, 0.47, 0.05, 0.31, 0.91, 2.17, 1.13] # for fair comparison we remove that
+    label_smoothing: 0.05
+    ignore_index: ${data.ignore_index}
+  - type: LovaszLoss
+    loss_weight: 1.0
+    mode: multiclass
+    ignore_index: ${data.ignore_index}
+
+# loggers:
+#   - type: ProgressBarLogger

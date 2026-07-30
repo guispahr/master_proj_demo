@@ -1,0 +1,23 @@
+# ── Dataset (Atocha) ───────────────────────────────────────────────
+data:
+  data_root: "/rcp/gspahr/A9CR"
+  num_classes: 12
+  ignore_index: 255
+
+
+dataset:
+  type: A9CR
+  with_image: False
+
+# ── Outputs & logging ─────────────────────────────────────────────────────────
+# REQUIRED in every experiment config — drives save_dir and W&B run name.
+run_name: ???
+
+outputs:
+  save_dir: ./outputs/a9cr/${run_name}
+
+loggers:
+  - type: CSVLogger
+  - type: WandbLogger
+    project: "A9CR"
+    name: ${run_name}

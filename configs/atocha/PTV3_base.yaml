@@ -1,0 +1,226 @@
+_base_: base.yaml
+
+run_name: PTV3/final
+
+dataset:
+  type: Atocha
+  with_image: False
+
+mix_prob: 0.8
+# =============================================================================
+# Model settings
+# =============================================================================
+model:
+  type: Base-Segmentor
+  num_classes: 10
+  backbone_out_channels: 64
+  backbone:
+    type: PT-v3-Base
+    in_channels: 6
+    order: ["z", "z-trans", "hilbert", "hilbert-trans"]
+    stride: [2, 2, 2, 2]
+    enc_depths: [2, 2, 2, 6, 2]
+    enc_channels: [32, 64, 128, 256, 512]
+    enc_num_head: [2, 4, 8, 16, 32]
+    enc_patch_size: [1024, 1024, 1024, 1024, 1024]
+    dec_depths: [2, 2, 2, 2]
+    dec_channels: [64, 64, 128, 256]
+    dec_num_head: [4, 4, 8, 16]
+    dec_patch_size: [1024, 1024, 1024, 1024]
+    mlp_ratio: 4
+    qkv_bias: True
+    qk_scale: null
+    attn_drop: 0.0
+    proj_drop: 0.0
+    drop_path: 0.3
+    pre_norm: True
+    shuffle_orders: True
+    enable_rpe: False
+    enable_flash: True
+    upcast_attention: False
+    upcast_softmax: False
+    pdnorm_bn: False
+    pdnorm_ln: False
+    pdnorm_decouple: False # For multi dataset
+    pdnorm_adaptive: False # Compute shift and scale with SiLU + Linear layer
+    pdnorm_affine: True
+    pdnorm_conditions: null #["ScanNet", "S3DIS", "Structured3D"] # For multi dataset
+
+
+training:
+  resume: null  # path to a checkpoint to resume from, e.g. "./outputs/run1/weights/last.pt"
+  epochs: 75
+  device: "cuda"
+  eval_every: 1
+  batch_size: 12
+  seed: 42
+  num_workers: 24
+  prefetch_factor: 1
+  amp: True
+  amp_dtype: bfloat16
+  grad_clip: 20.0
+  debug_nan: True
+  grad_accum: 1
+  save_period: 5
+  early_stopping_patience: 0   # 0 = disabled
+  transform:
+    - Update:
+        keys_dict:
+          index_valid_keys: [
+              coord,
+              color,
+              segment,
+              grid_coord
+          ]
+    
+    - CenterShift:
+        apply_z: True
+        center_mode: bounding_box
+
+    - RandomZRotation:
+        angle_range: [-1, 1]
+
+    - RandomScale:
+        scale_range: [0.9, 1.1]
+
+    - RandomJitter:
+        sigma: 0.01
+        clip: 0.05
+
+    - RandomFlip:
+        p: 0.5
+
+    - GridSample:
+        grid_size: 0.05
+        # grid_sizes: [0.4, 0.5, 0.6]
+        hash_type: "fnv"
+        mode: "train"
+        return_grid_coord: True
+
+    - NormalizeColor: null
+
+    - ToTensor: null  # no arguments
+
+    - Collect:
+        keys: ["coord", "grid_coord", "segment"]
+        feat_keys: ["coord", "color"]
+
+val:
+ batch_size: 12
+ num_workers: 6
+ transform:
+  - Copy:
+      keys_dict: {"segment": "origin_segment"}
+  - Update:
+      keys_dict:
+        index_valid_keys: [
+              coord,
+              color,
+              segment,
+              grid_coord,
+          ]
+
+  - CenterShift:
+      apply_z: True
+      center_mode: bounding_box
+  
+  - GridSample:
+      grid_size: 0.05
+      hash_type: "fnv"
+      mode: "train"
+      return_grid_coord: True
+      return_inverse: True
+
+  - NormalizeColor: null
+
+  - ToTensor: null  # no arguments
+
+  - Collect:
+      keys: ["coord", "grid_coord", "segment", "origin_segment"]
+      feat_keys: ["coord", "color"]
+
+test:
+  checkpoint: ./outputs/atocha/${run_name}/weights/best.pt
+  results_dir: ./outputs/atocha/${run_name}/val_results #val_results
+  batch_size: 1
+  num_workers: 3
+  split: val 
+
+  transform:
+    - Copy:
+        keys_dict: {"segment": "origin_segment"}
+    - Update:
+        keys_dict:
+          index_valid_keys: [coord, color, normal, segment]
+    - CenterShift:
+        apply_z: True
+        center_mode: bounding_box
+    - NormalizeColor: null
+    - GridSample:
+        grid_size: 0.02
+        hash_type: fnv
+        mode: train
+        return_grid_coord: False
+        return_inverse: True
+
+  test_cfg:
+    voxelize:
+      grid_size: 0.05
+      hash_type: fnv
+      mode: test
+      return_grid_coord: True
+
+    crop: null
+
+    post_transform:
+      # - CenterShift:
+      #   apply_z: False
+      #   center_mode: bounding_box
+      - ToTensor: null
+      - Collect:
+          keys: ["coord", "grid_coord", "index"]
+          feat_keys: ["coord", "color"]
+
+    # Each entry = per-pipeline transform dict. `{}` means identity.
+    # RandomFlip(p=1) always flips; axis picked randomly per call.
+    aug_transform:
+      - RandomScale: {scale_range: [0.95, 0.95]}
+      - RandomScale: {scale_range: [1.00, 1.00]}
+      - RandomScale: {scale_range: [1.05, 1.05]}
+      - {RandomScale: {scale_range: [0.95, 0.95]}, RandomFlip: {p: 1.0}}
+      - {RandomScale: {scale_range: [1.0, 1.0]}, RandomFlip: {p: 1.0}}
+      - {RandomScale: {scale_range: [1.05, 1.05]}, RandomFlip: {p: 1.0}}
+
+optim:
+  optimizer: adamw
+  weight_decay: 0.005
+  momentum: 0.95
+
+param_dicts:
+  - keyword: block
+    lr: 2e-4 # scales every scheduler parameters based on ratio lr/peak_lr
+
+# scheduler:
+#   start_lr: 1e-7
+#   peak_lr: 2e-3  # base learning rate
+#   end_lr: 1e-5
+#   warmup_epoch: 5
+
+scheduler:
+  type: OneCycleLR
+  max_lr: 2e-3
+  anneal_strategy: cos
+  pct_start: 0.04
+  div_factor: 10.0
+  final_div_factor: 100.0
+
+losses:
+  - type: CrossEntropyLoss
+    loss_weight: 1.0
+    # weight: [10.180, 8.113, 1.885, 27.299, 22.613, 25.240, 23.261, 48.904, 17.618] # 1 / log(1.02 + p_c)
+    # label_smoothing: 0.05
+    ignore_index: ${data.ignore_index}
+  - type: LovaszLoss
+    loss_weight: 1.0
+    mode: multiclass
+    ignore_index: ${data.ignore_index}

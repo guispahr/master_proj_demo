@@ -1,0 +1,23 @@
+# ── Dataset (Atocha) ───────────────────────────────────────────────
+data:
+  data_root: "/rcp/gspahr/nuscenes_preprocessed"
+  num_classes: 16
+  ignore_index: -1
+
+
+dataset:
+  type: NuScenesDataset
+  with_images: False
+
+# ── Outputs & logging ─────────────────────────────────────────────────────────
+# REQUIRED in every experiment config — drives save_dir and W&B run name.
+run_name: ???
+
+outputs:
+  save_dir: ./outputs/nuscenes/${run_name}
+
+loggers:
+  - type: CSVLogger
+  - type: WandbLogger
+    project: "nuscenes"
+    name: ${run_name}

@@ -1,0 +1,348 @@
+# I = G + a late, query-based, pose-free multi-view fusion head.
+#
+# Structure & augmentations follow configs/nuscenes/litept_ditr_v2_final.yaml exactly
+# (NuScenes dataset, OneCycle scheduler, per-stage multi-cam dec_fusion). The only
+# additions are: backbone type -> LitePT-Ditr-v2-I, the `late_fusion` block, and
+# EMA of weights. With late_fusion.enabled=false this is numerically identical to G.
+#
+# The late head runs AFTER the full decoder, at full resolution: each point's final
+# geometry feature queries one token per (visible camera x DINO layer) and content-
+# selects which view + abstraction layer to trust. Pose-free / camera-id-free.
+
+_base_: base.yaml
+
+run_name: LitePT-Ditr-v2-I/run5
+
+dataset:
+  type: NuScenesDataset
+  with_images: True
+
+mix_prob: 0.8
+
+# =============================================================================
+# Model settings
+# =============================================================================
+model:
+  type: Point-Segmentor-GeoAux
+  num_classes: 16
+  backbone_out_channels: 72
+  geo_out_channels: 72
+  backbone:
+    type: LitePT-Ditr-v2-I
+    in_channels: 4
+    order: ["z", "z-trans", "hilbert", "hilbert-trans"]
+    stride: [2, 2, 2, 2]
+    enc_depths: [2, 2, 2, 6, 2]
+    enc_channels: [48, 96, 192, 384, 504]
+    enc_num_head: [2, 4, 8, 16, 28]
+    enc_patch_size: [1024, 1024, 1024, 1024, 1024]
+    enc_conv: [True, True, True, False, False]
+    enc_attn: [False, False, False, True, True]
+    enc_rope_freq: [100.0, 100.0, 100.0, 100.0, 100.0]
+    dec_depths: [0, 0, 0, 0]
+    dec_channels: [72, 72, 144, 252]
+    dec_num_head: [4, 4, 8, 14]
+    dec_patch_size: [1024, 1024, 1024, 1024]
+    dec_conv: [False, False, False, False]
+    dec_attn: [False, False, False, False]
+    dec_rope_freq: [100.0, 100.0, 100.0, 100.0]
+    mlp_ratio: 4
+    qkv_bias: True
+    qk_scale: null
+    attn_drop: 0.0
+    proj_drop: 0.0
+    drop_path: 0.3
+    pre_norm: True
+    shuffle_orders: True
+    enc_mode: False
+    freeze_encoder: False
+    dino_type: DinoV3
+    dino_size: large
+    dino_frozen: True
+    use_checkpoint: False
+
+    # dec_fusion:
+    #   - name: add_skip_up     # s=0  finest  (dec_channels[0] = 72)  — geometry only
+    #     use_ffn: False
+    #   - name: add_skip_up     # s=1           (dec_channels[1] = 72)  — geometry only
+    #     use_ffn: False
+    #   - name: add_skip_up            # s=2  (dec_channels[2] = 144) — flat multi-cam, single-pixel
+    #     use_ffn: False
+    #   - name: fuse_then_attn            # s=3  coarsest (dec_channels[3] = 252) — factorized, richest fusion near bottleneck
+    #     attn: multicam_factorized
+    #     window_size: 3
+    #     num_heads: 6
+    #     use_ffn: True
+    dec_fusion:
+      - name: add_skip_up_image     # s=0  finest  (dec_channels[0] = 72)  — geometry only
+        use_ffn: False
+      - name: add_skip_up_image     # s=1           (dec_channels[1] = 72)  — geometry only
+        use_ffn: False
+      - name: add_skip_up_image            # s=2  (dec_channels[2] = 144) — flat multi-cam, single-pixel
+        use_ffn: True
+      - name: add_skip_up_image            # s=3  coarsest (dec_channels[3] = 252) — factorized, richest fusion near bottleneck
+        use_ffn: True
+
+    image_coord_reduce: masked_mean
+    # K = 4 DINO blocks. Same indices as F so the input signal is identical.
+    dino_fusion_layers: [-18, -12, -6, -1]
+
+    # image_fusion_type: concat  # "concat" (SegDino) | "attention"
+    
+    # Per-DINO-layer projection width. Output width = K * c_proj = 4 * 128 = 512
+    # (matches F's image_inner_dim). Bump to 256/512 to widen the concat output.
+    image_fusion_type: concat
+    c_proj: 128
+
+    img_proj_dropout: 0.1
+
+    # One spatial octave per decoder stage, matching the 3D backbone's
+    # stride-2 pooling. Stage s gets image map at (H/2^s, W/2^s) and effective
+    # patch_size = base_patch_size * 2^s.
+    pyramid_stage_downsamples: [0, 1, 2, 3]
+
+    geo_dec: true
+
+    # ---- Late multi-view fusion head (the I contribution). Reuses the same
+    # dino_fusion_layers intermediates (no extra DINO pass). enabled=false ->
+    # numerically identical to G. NuScenes point clouds are large, so the head
+    # is gradient-checkpointed; drop d_model to 64 if VRAM is tight.
+    late_fusion:
+      # type: concat                # or "attention" (default)
+      # concat_hidden: 256        # optional MLP hidden width
+      enabled: true
+      d_model: 128          # token width; drop to 64 if memory-tight
+      num_heads: 4
+      token_dropout: 0.2    # multi-view token dropout (train only)
+      checkpoint: false      # gradient-checkpoint the head (full-res default)
+
+
+# =============================================================================
+# Training settings
+# =============================================================================
+training:
+  split: train
+  resume: null
+  epochs: 50
+  device: "cuda"
+  eval_every: 1
+  batch_size: 12
+  seed: 42
+  num_workers: 21
+  prefetch_factor: 2
+  amp: True
+  amp_dtype: bfloat16
+  grad_clip: 20.0
+  debug_nan: True
+  grad_accum: 1
+  save_period: 10
+  early_stopping_patience: 0
+  # EMA of weights — validation, best-checkpoint selection and best.pt export
+  # use the smoothed weights.
+  ema: false
+  ema_decay: 0.9999
+  transform:
+    - Update:
+        keys_dict:
+          index_valid_keys: [
+              coord,
+              strength,
+              segment,
+              grid_coord,
+              image_coord,
+              image_mask
+          ]
+
+    - RandomZRotation:
+        angle_range: [-1, 1]
+
+    - RandomScale:
+        scale_range: [0.9, 1.1]
+
+    - RandomJitter:
+        sigma: 0.005
+        clip: 0.02
+
+    - RandomFlip:
+        p: 0.5
+
+    - GridSample:
+        grid_size: 0.05
+        hash_type: "fnv"
+        mode: "train"
+        return_grid_coord: True
+    
+    # - ClipImages:
+    #     max_images: 4
+    #     random_select: false   # false = keep first N, true = random N-subset
+
+    # - RandomImageSelect:
+    #     min_images: 2
+    #     max_images: 10    # train-time view aug
+
+    - ImageResize:
+        size: [576, 1024]
+
+    - ImageColorJitter:
+        brightness: 0.4
+        contrast: 0.4
+        saturation: 0.2
+        hue: 0.1
+
+    - ImageRandomHorizontalFlip: null
+
+    - ImageNormalize: null
+
+    - ToTensor: null
+
+    - Collect:
+        keys: ["coord", "grid_coord", "segment", "image", "image_coord", "image_mask"]
+        feat_keys: ["coord", "strength"]
+
+
+# =============================================================================
+# Validation settings
+# =============================================================================
+
+val:
+ split: val
+ batch_size: 12
+ num_workers: 24
+ transform:
+  - Update:
+      keys_dict:
+        index_valid_keys: [
+              coord,
+              strength,
+              segment,
+              grid_coord,
+              image_coord,
+              image_mask
+          ]
+
+  - GridSample:
+      grid_size: 0.05
+      hash_type: "fnv"
+      mode: "train"
+      return_grid_coord: True
+
+  - ImageResize:
+        size: [576, 1024]
+
+  - ImageNormalize: null
+
+  - ToTensor: null
+
+  - Collect:
+      keys: ["coord", "grid_coord", "segment", "image", "image_coord", "image_mask"]
+      feat_keys: ["coord", "strength"]
+
+
+# =============================================================================
+# Eval-harness metrics (validation only). Omit this block entirely for the
+# default behaviour (plain SegmentationMetrics). Both metrics are no-ops during
+# training and on the full-resolution val path (which forwards only `segment`).
+# =============================================================================
+eval_metrics:
+  range_binned:
+    enabled: true
+    bins: [20, 40]       # -> mIoU@0-20m / @20-40m / @40m+ ; nuScenes is ego-centred
+    # origin: [0, 0]     # optional sensor xy origin (defaults to 0,0)
+  boundary:
+    enabled: true
+    radius: 0.05         # 5 cm boundary band (matches the val GridSample grid_size)
+
+
+# =============================================================================
+# Test settings
+# =============================================================================
+test:
+  split: val
+  checkpoint: ./outputs/nuscenes/${run_name}/weights/best.pt
+  results_dir: ./outputs/nuscenes/${run_name}/test_results
+  batch_size: 1
+  num_workers: 4
+
+  transform:
+    - Copy:
+        keys_dict: {"segment": "origin_segment"}
+    - Update:
+        keys_dict:
+          index_valid_keys: [coord, strength, segment, "image_coord", "image_mask"]
+    - GridSample:
+        grid_size: 0.025
+        hash_type: fnv
+        mode: train
+        return_inverse: True
+
+    - ImageResize:
+        size: [576, 1024]
+
+  test_cfg:
+    voxelize:
+      grid_size: 0.05
+      hash_type: fnv
+      mode: test
+      return_grid_coord: True
+
+    crop: null
+
+    post_transform:
+      - ImageNormalize: null
+      - ToTensor: null
+      - Collect:
+          keys: ["coord", "grid_coord", "segment", "image_coord", "image_mask"]
+          feat_keys: ["coord", "strength"]
+
+    aug_transform:
+      - RandomScale: {scale_range: [0.9, 0.9]}
+      - RandomScale: {scale_range: [0.95, 0.95]}
+      - RandomScale: {scale_range: [1, 1]}
+      - RandomScale: {scale_range: [1.05, 1.05]}
+      - RandomScale: {scale_range: [1.1, 1.1]}
+      - {RandomScale: {scale_range: [0.9, 0.9]}, RandomFlip: {p: 1.0}}
+      - {RandomScale: {scale_range: [0.95, 0.95]}, RandomFlip: {p: 1.0}}
+      - {RandomScale: {scale_range: [1, 1]}, RandomFlip: {p: 1.0}}
+      - {RandomScale: {scale_range: [1.05, 1.05]}, RandomFlip: {p: 1.0}}
+      - {RandomScale: {scale_range: [1.1, 1.1]}, RandomFlip: {p: 1.0}}
+
+# =============================================================================
+# Optimizer and scheduler settings
+# =============================================================================
+
+optim:
+  optimizer: adamw
+  weight_decay: 0.005
+
+param_dicts:
+  - keyword: block
+    lr: 2e-4
+  - keyword: late_fusion
+    lr: 2e-4
+
+
+scheduler:
+  type: OneCycleLR
+  max_lr: 2e-3
+  anneal_strategy: cos
+  pct_start: 0.04
+  div_factor: 10.0
+  final_div_factor: 100.0
+
+
+losses:
+  - type: CrossEntropyLoss
+    loss_weight: 1.0
+    # label_smoothing: 0.01
+    ignore_index: ${data.ignore_index}
+  - type: LovaszLoss
+    loss_weight: 1.0
+    mode: multiclass
+    ignore_index: ${data.ignore_index}
+  - type: AuxGeoLoss
+    loss_weight: 0.5
+    ignore_index: ${data.ignore_index}
+    # label_smoothing: 0.01
+    ce_weight: 1.0
+    lovasz_weight: 1.0
+    lovasz_mode: multiclass

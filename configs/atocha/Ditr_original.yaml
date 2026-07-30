@@ -1,0 +1,285 @@
+_base_: base.yaml
+
+run_name: Ditr/final2
+
+dataset:
+  type: Atocha
+  with_image: True
+
+mix_prob: 0.8
+
+# =============================================================================
+# Model settings
+# =============================================================================
+model:
+  type: Base-Segmentor
+  num_classes: 10
+  backbone_out_channels: 96
+  backbone:
+    type: PT-v3m2-image
+    in_channels: 6
+    order: ["z", "z-trans", "hilbert", "hilbert-trans"]
+    stride: [2, 2, 2, 2]
+    enc_depths: [2, 2, 2, 6, 2]
+    enc_channels: [48, 96, 192, 384, 576]
+    enc_num_head: [2, 4, 8, 16, 32]
+    enc_patch_size: [1024, 1024, 1024, 1024, 1024]
+    dec_depths: [2, 2, 2, 2]
+    dec_channels: [96, 96, 192, 384]
+    dec_num_head: [4, 4, 8, 16]
+    dec_patch_size: [1024, 1024, 1024, 1024]
+    mlp_ratio: 4
+    qkv_bias: True
+    qk_scale: null
+    attn_drop: 0.0
+    proj_drop: 0.0
+    drop_path: 0.3
+    pre_norm: True
+    shuffle_orders: True
+    enable_rpe: False
+    enable_flash: True
+    upcast_attention: False
+    upcast_softmax: False
+    pdnorm_decouple: False
+    dinov2: giant
+    dinov2_frozen: True
+    # image_inner_dim: 512
+    image_inner_dim: null
+    enc_use_checkpoint:  False
+    dec_use_checkpoint: False
+
+
+# =============================================================================
+# Training settings
+# =============================================================================
+
+training:
+  split: train
+  resume: null  # path to a checkpoint to resume from, e.g. "./outputs/run1/weights/last.pt"
+  epochs: 50
+  device: "cuda"
+  eval_every: 1
+  test_every: 5
+  batch_size: 12
+  seed: 42
+  num_workers: 24
+  amp: True
+  amp_dtype: bfloat16
+  grad_clip: 20.0
+  debug_nan: True
+  grad_accum: 1
+  save_period: 1
+  early_stopping_patience: 0   # 0 = disabled
+  transform:
+    - Update:
+        keys_dict:
+          index_valid_keys: [
+              coord,
+              color,
+              segment,
+              grid_coord,
+              image_coord,
+              image_mask
+          ]
+    
+    - CenterShift:
+        apply_z: True
+        center_mode: bounding_box
+
+    - RandomZRotation:
+        angle_range: [-1, 1]
+
+    - RandomScale:
+        scale_range: [0.9, 1.1]
+
+    - RandomJitter:
+        sigma: 0.01
+        clip: 0.05
+
+    - RandomFlip:
+        p: 0.5
+
+    - GridSample:
+        grid_size: 0.05
+        # grid_sizes: [0.4, 0.5, 0.6]
+        hash_type: "fnv"
+        mode: "train"
+        return_grid_coord: True
+
+    - NormalizeColor: null
+
+    - ImageResize:
+        size: [1036, 1036]
+
+    - ImageColorJitter:
+        brightness: 0.4
+        contrast: 0.4
+        saturation: 0.2
+        hue: 0.1
+
+    - ImageRandomHorizontalFlip: null
+
+    - ImageNormalize: null
+    
+    - ToTensor: null  # no arguments
+
+    - Collect:
+        keys: ["coord", "grid_coord", "segment", "image", "image_coord", "image_mask"]
+        feat_keys: ["coord", "color"]
+
+
+# =============================================================================
+# Validation settings
+# =============================================================================
+
+val:
+ split: val
+ batch_size: 12
+ num_workers: 20
+ transform:
+  - Copy:
+      keys_dict: {"segment": "origin_segment"}
+  - Update:
+      keys_dict:
+        index_valid_keys: [
+              coord,
+              color,
+              segment,
+              grid_coord,
+              image_coord,
+              image_mask
+          ]
+
+  - CenterShift:
+      apply_z: True
+      center_mode: bounding_box
+
+  - GridSample:
+      grid_size: 0.05
+      hash_type: "fnv"
+      mode: "train"
+      return_grid_coord: True
+
+  - NormalizeColor: null
+
+  - ImageResize:
+      size: [1036, 1036]
+
+  - ImageNormalize: null
+
+  - ToTensor: null
+  
+  - Collect:
+      keys: ["coord", "grid_coord", "segment", "image", "image_coord", "image_mask"]
+      feat_keys: ["coord", "color"]
+
+
+# =============================================================================
+# Test settings
+# =============================================================================
+test:
+  split: test
+  checkpoint: ./outputs/atocha/${run_name}/weights/best.pt
+  results_dir: ./outputs/atocha/${run_name}/test_results
+  batch_size: 1
+  num_workers: 15
+
+  transform:
+    - Update:
+        keys_dict:
+          index_valid_keys: [coord, color, segment, image_coord, image_mask]
+    - CenterShift:
+        apply_z: True
+        center_mode: bounding_box
+    - NormalizeColor: null
+    - ImageResize:
+        size: [1036, 1036]
+    - ImageNormalize: null
+    - GridSample:
+        grid_size: 0.025
+        hash_type: fnv
+        mode: train
+        return_grid_coord: False
+        return_inverse: True
+
+  test_cfg:
+    voxelize:
+      grid_size: 0.05
+      hash_type: fnv
+      mode: test
+      return_grid_coord: True
+
+    crop: null
+
+    post_transform:
+      - CenterShift:
+          apply_z: False
+          center_mode: bounding_box
+      - ToTensor: null
+      - Collect:
+          keys: ["coord", "grid_coord", "index", "image_coord", "image_mask"]
+          feat_keys: ["coord", "color"]
+
+    aug_transform:
+      - RandomScale: {scale_range: [0.95, 0.95]}
+      - RandomScale: {scale_range: [1.00, 1.00]}
+      - RandomScale: {scale_range: [1.05, 1.05]}
+      - {RandomScale: {scale_range: [0.95, 0.95]}, RandomFlip: {p: 1.0}}
+      - {RandomScale: {scale_range: [1.0, 1.0]}, RandomFlip: {p: 1.0}}
+      - {RandomScale: {scale_range: [1.05, 1.05]}, RandomFlip: {p: 1.0}}
+
+# =============================================================================
+# Optimizer and scheduler settings
+# =============================================================================
+
+optim:
+  optimizer: adamw
+  weight_decay: 0.002
+  momentum: 0.95
+
+# Per-group learning rates. Each entry matches parameters whose name contains
+# 'keyword' and assigns them a distinct peak_lr.
+# Groups not matched by any keyword fall back to scheduler.peak_lr.
+#
+# For e.g:
+#
+#   param_dicts:
+#     - keyword: block
+#       lr: 2e-4
+# or
+#   param_dicts:
+#     - keyword: backbone.enc
+#       lr: 2e-4
+#
+# All groups follow the same warmup/cosine curve shape, just scaled to their peak.
+param_dicts:
+  - keyword: block
+    lr: 2e-4 # scales every scheduler parameters based on ratio lr/peak_lr
+
+# scheduler:
+#   start_lr: 1e-7
+#   peak_lr: 2e-3  # base learning rate
+#   end_lr: 1e-5
+#   warmup_epoch: 5
+
+scheduler:
+  type: OneCycleLR
+  max_lr: 2e-3
+  anneal_strategy: cos
+  pct_start: 0.04
+  div_factor: 10.0
+  final_div_factor: 100.0
+
+# =============================================================================
+# Losses settings
+# =============================================================================
+
+losses:
+  - type: CrossEntropyLoss
+    loss_weight: 1.0
+    ignore_index: ${data.ignore_index}
+  - type: LovaszLoss
+    loss_weight: 1.0
+    mode: multiclass
+    ignore_index: ${data.ignore_index}
+

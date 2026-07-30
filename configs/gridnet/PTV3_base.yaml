@@ -1,0 +1,219 @@
+_base_: base.yaml
+
+run_name: PTV3/run1
+
+dataset:
+  type: GridNet-Pair-Dataset
+  with_image: False
+
+mix_prob: 0
+
+# =============================================================================
+# Model settings
+# =============================================================================
+model:
+  type: Base-Segmentor
+  num_classes: 11
+  backbone_out_channels: 64
+  backbone:
+    type: PT-v3-Base
+    in_channels: 6
+    order: ["z", "z-trans", "hilbert", "hilbert-trans"]
+    stride: [2, 2, 2, 2]
+    enc_depths: [2, 2, 2, 6, 2]
+    enc_channels: [32, 64, 128, 256, 512]
+    enc_num_head: [2, 4, 8, 16, 32]
+    enc_patch_size: [1024, 1024, 1024, 1024, 1024]
+    dec_depths: [2, 2, 2, 2]
+    dec_channels: [64, 64, 128, 256]
+    dec_num_head: [4, 4, 8, 16]
+    dec_patch_size: [1024, 1024, 1024, 1024]
+    mlp_ratio: 4
+    qkv_bias: True
+    qk_scale: null
+    attn_drop: 0.0
+    proj_drop: 0.0
+    drop_path: 0.3
+    pre_norm: True
+    shuffle_orders: True
+    enable_rpe: False
+    enable_flash: True
+    upcast_attention: False
+    upcast_softmax: False
+    pdnorm_bn: False
+    pdnorm_ln: False
+    pdnorm_decouple: False # For multi dataset
+    pdnorm_adaptive: False # Compute shift and scale with SiLU + Linear layer
+    pdnorm_affine: True
+    pdnorm_conditions: null #["ScanNet", "S3DIS", "Structured3D"] # For multi dataset
+
+training:
+  split: train
+  resume: null  # path to a checkpoint to resume from, e.g. "./outputs/run1/weights/last.pt"
+  epochs: 50
+  device: "cuda"
+  eval_every: 2
+  test_every: 5
+  batch_size: 5
+  seed: 42
+  num_workers: 5
+  amp: True
+  amp_dtype: bfloat16
+  grad_clip: 5.0
+  debug_nan: True
+  grad_accum: 1
+  save_period: 2
+  early_stopping_patience: 0   # 0 = disabled
+  transform:
+    - Update:
+        keys_dict:
+          index_valid_keys: [
+              coord,
+              color,
+              segment,
+              grid_coord
+          ]
+
+    - RandomZRotation:
+        angle_range: [-1, 1]
+
+    - RandomScale:
+        scale_range: [0.95, 1.05]
+
+    - RandomJitter:
+        sigma: 0.01
+        clip: 0.05
+
+    - RandomFlip:
+        p: 0.5
+
+    - CenterShift:
+        apply_z: False
+        center_mode: centroid
+
+    - RandomShift:
+        shift: [[-0.2, 0.2], [-0.2, 0.2], [0, 0]]
+
+    - RandomDropout:
+        dropout_ratio: 0.2
+        dropout_application_ratio: 0.5
+
+    - GridSample:
+        grid_size: 0.05
+        hash_type: "fnv"
+        mode: "train"
+        return_grid_coord: True
+
+    # SmartPointSampler:
+    #   max_points: 122880
+    #   class_weights: [3.6037, 4.767, 9.5346, 13.484, 0.85615, 1.63523, 0.34785, 1.1563, 3.37105, 20., 4.7673] # weights**0.5
+    #   ignore_index: ${data.ignore_index}
+    #   ignore_kept_weight: 0.05
+
+    # RandomColorJitter:
+    #   brightness: 0.1
+    #   contrast: 0.1
+
+    - NormalizeColor: null
+
+    - ColorDrop:
+        p: 0.1
+
+    - ToTensor: null  # no arguments
+
+    - Collect:
+        keys: ["coord", "grid_coord", "segment"]
+        feat_keys: ["coord", "color"]
+
+val:
+ split: val
+ batch_size: 2 # number of images per batch
+ num_workers: 2
+ transform:
+  - Update:
+      keys_dict:
+        index_valid_keys: [
+              coord,
+              color,
+              segment,
+              grid_coord,
+          ]
+
+  - CenterShift:
+        apply_z: False
+        center_mode: centroid
+  
+  - GridSample:
+      grid_size: 0.05
+      hash_type: "fnv"
+      mode: "train"
+      return_grid_coord: True
+      return_inverse: True
+
+  # SmartPointSampler:
+  #   max_points: 49152
+  #   ignore_index: 11
+  #   ignore_kept_weight: 0.05
+
+  - NormalizeColor: null
+
+  - ToTensor: null  # no arguments
+
+  - Collect:
+      keys: ["coord", "grid_coord", "segment"]
+      feat_keys: ["coord", "color"]
+
+test:
+ split: test
+ batch_size: 1 # number of images per batch
+ num_workers: 1
+ transform:
+
+
+optim:
+  optimizer: adamw
+  weight_decay: 0.005
+  momentum: 0.95
+
+# Per-group learning rates. Each entry matches parameters whose name contains
+# 'keyword' and assigns them a distinct peak_lr.
+# Groups not matched by any keyword fall back to scheduler.peak_lr.
+#
+# For e.g:
+#
+#   param_dicts:
+#     - keyword: block
+#       lr: 2e-4
+# or
+#   param_dicts:
+#     - keyword: backbone.enc
+#       lr: 2e-4
+#
+# All groups follow the same warmup/cosine curve shape, just scaled to their peak.
+param_dicts:
+  - keyword: block
+    lr: 2e-4 # scales every scheduler parameters based on ratio lr/peak_lr
+
+scheduler:
+  start_lr: 1e-7
+  peak_lr: 2e-3  # base learning rate
+  end_lr: 1e-5
+  warmup_epoch: 5
+
+losses:
+  - type: CrossEntropyLoss
+    loss_weight: 1.0
+    weight: [0.95, 1.13, 1.63, 1.88, 0.20, 0.47, 0.05, 0.31, 0.91, 2.17, 1.13]
+    label_smoothing: 0.05
+    ignore_index: ${data.ignore_index}
+  - type: LovaszLoss
+    loss_weight: 1.0
+    mode: multiclass
+    ignore_index: ${data.ignore_index}
+
+# loggers:
+#   - type: ProgressBarLogger
+#   - type: CSVLogger
+  # - type: WandbLogger
+  #   project: "GridNet-HD-PTV3"
+  #   name: "run1"

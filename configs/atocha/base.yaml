@@ -1,0 +1,24 @@
+# ── Dataset (Atocha) ───────────────────────────────────────────────
+data:
+  data_root: "/rcp/gspahr/ATOCHA"
+  num_classes: 10
+  # class_weight: [0.0069, 0.0051, 0.0008, 0.0330, 0.0226, 0.0279, 0.0238, 0.8649, 0.0149]
+  ignore_index: 255
+
+
+dataset:
+  type: Atocha
+  with_image: False
+
+# ── Outputs & logging ─────────────────────────────────────────────────────────
+# REQUIRED in every experiment config — drives save_dir and W&B run name.
+run_name: ???
+
+outputs:
+  save_dir: ./outputs/atocha/${run_name}
+
+loggers:
+  - type: CSVLogger
+  - type: WandbLogger
+    project: "Atocha"
+    name: ${run_name}

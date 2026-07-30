@@ -1,0 +1,24 @@
+# ── Dataset (Atocha) ───────────────────────────────────────────────
+data:
+  data_root: "/rcp/gspahr/s3dis"
+  num_classes: 13
+  ignore_index: -1
+
+
+dataset:
+  type: S3DIS
+  with_images: False
+  image_root: "/rcp/gspahr/s3dis_images"
+
+# ── Outputs & logging ─────────────────────────────────────────────────────────
+# REQUIRED in every experiment config — drives save_dir and W&B run name.
+run_name: ???
+
+outputs:
+  save_dir: ./outputs/s3dis/${run_name}
+
+loggers:
+  - type: CSVLogger
+  - type: WandbLogger
+    project: "S3DIS"
+    name: ${run_name}
