@@ -1,12 +1,10 @@
 <h1 align="center">LiDAR Semantic Segmentation with Image Fusion</h1>
 
 
-<p align="center">
- **Note**
-
-Parts of the codebase corresponding to ongoing research are intentionally
-omitted and will be released after publication.
-</p>
+> **⚠️ Repository status**
+>
+> Parts of the codebase corresponding to ongoing research are intentionally
+> omitted and will be released upon publication.
 
 <p align="center">
   Point-cloud semantic segmentation with optional multi-view <b>camera–image fusion</b>,
