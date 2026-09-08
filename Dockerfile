@@ -35,11 +35,3 @@ WORKDIR /app
 USER ${LDAP_USERNAME}
 CMD ["python"] 
 
-# Type build with this
-# docker build \
-#   -t registry.rcp.epfl.ch/lts2-gspahr/nameofimage:latest \
-#   --build-arg LDAP_GID=10423 \
-#   --build-arg LDAP_UID=217146 \
-#   --build-arg LDAP_USERNAME=gspahr \
-#   --build-arg LDAP_GROUPNAME=lts2 \
-#   .
